@@ -1,11 +1,13 @@
 using System.Buffers.Binary;
 using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
 
 namespace RiMCP.Core.Storage;
 
 /// <summary>
 /// vectors.bin 的读写与 mmap 随机访问。64 字节固定头部、8 字节对齐，
 /// 数据区为定长记录（id + float16 向量），支持按 id 零拷贝 O(1) 读取。
+/// 另提供 <see cref="OpenInMemory"/>：整文件读入 byte[]，避免按需换页。
 /// </summary>
 public sealed unsafe class VectorsBin : IDisposable
 {
@@ -18,6 +20,7 @@ public sealed unsafe class VectorsBin : IDisposable
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _view;
     private byte* _base;        // 视图映射基址（对应文件偏移 0）
+    private byte[]? _buffer;    // full 模式：整文件读入后的缓冲区
 
     private bool _writable;
     private int _dim;
@@ -42,7 +45,7 @@ public sealed unsafe class VectorsBin : IDisposable
 
     private void ThrowIfNotMapped()
     {
-        if (_base == null)
+        if (_base == null && _buffer == null)
             throw new InvalidOperationException("VectorsBin 未打开，请先调用 Open/Create。");
     }
 
@@ -99,6 +102,56 @@ public sealed unsafe class VectorsBin : IDisposable
                 throw new InvalidDataException("vecStride 与 dim 不符，索引损坏。");
             result._stream = stream;
             result.MapView(readOnly: true);
+            return result;
+        }
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// 以只读方式打开已有向量文件并把整个文件读入内存（full 加载模式），
+    /// 避免查询时按需换页；<see cref="GetVector"/> 直接切片该缓冲区。
+    /// </summary>
+    public static VectorsBin OpenInMemory(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        if (bytes.Length < HeaderSize)
+            throw new InvalidDataException("vectors.bin 文件过短，无法读取头部。");
+
+        var result = new VectorsBin();
+        ReadHeader(bytes, result);
+        if (result._vecStride != IdBytes + result._dim * sizeof(short))
+            throw new InvalidDataException("vecStride 与 dim 不符，索引损坏。");
+        long expected = result._dataOffset + result._recordCount * result._vecStride;
+        if (bytes.LongLength != expected)
+            throw new InvalidDataException(
+                $"vectors.bin 长度 {bytes.LongLength} 与头部声明的 {expected} 不符，索引损坏。");
+        result._buffer = bytes;
+        return result;
+    }
+
+    /// <summary>
+    /// 以读写方式打开已有向量文件并 mmap（检查点续跑时继续写入未完成的 ONNX 批次）。
+    /// </summary>
+    public static VectorsBin OpenWritable(string path)
+    {
+        var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+        try
+        {
+            var header = new byte[HeaderSize];
+            int n = stream.Read(header, 0, HeaderSize);
+            if (n != HeaderSize)
+                throw new InvalidDataException("vectors.bin 文件过短，无法读取头部。");
+
+            var result = new VectorsBin { _writable = true };
+            ReadHeader(header, result);
+            if (result._vecStride != IdBytes + result._dim * sizeof(short))
+                throw new InvalidDataException("vecStride 与 dim 不符，索引损坏。");
+            result._stream = stream;
+            result.MapView(readOnly: false);
             return result;
         }
         catch
@@ -167,24 +220,53 @@ public sealed unsafe class VectorsBin : IDisposable
         vector.Slice(0, _dim).CopyTo(new Span<Half>(row + IdBytes, _dim));
     }
 
+    /// <summary>只写记录头的 id 字段，不写向量数据（复制阶段为未命中记录占位）。</summary>
+    public void WriteRecordId(int id)
+    {
+        if (!_writable) throw new InvalidOperationException("只读模式不能写入。");
+        ThrowIfNotMapped();
+        CheckId(id);
+        byte* row = _base + _dataOffset + (long)id * _vecStride;
+        BinaryPrimitives.WriteInt64LittleEndian(new Span<byte>(row, IdBytes), id);
+    }
+
+    /// <summary>读取记录头中存储的 id（用于校验文件连续性）。</summary>
+    public long GetRecordId(int id)
+    {
+        ThrowIfNotMapped();
+        CheckId(id);
+        long offset = _dataOffset + (long)id * _vecStride;
+        if (_buffer is not null)
+            return BinaryPrimitives.ReadInt64LittleEndian(
+                new ReadOnlySpan<byte>(_buffer, checked((int)offset), IdBytes));
+        byte* row = _base + offset;
+        return BinaryPrimitives.ReadInt64LittleEndian(new ReadOnlySpan<byte>(row, IdBytes));
+    }
+
     /// <summary>
-    /// 读取第 <paramref name="id"/> 条向量，返回指向映射内存的只读 Span。
+    /// 读取第 <paramref name="id"/> 条向量，返回指向映射内存（或 full 模式缓冲区）的只读 Span。
     /// 注意：返回的 Span 仅在实例未 <see cref="Close"/> 前有效。
     /// </summary>
     public ReadOnlySpan<Half> GetVector(int id)
     {
         ThrowIfNotMapped();
         CheckId(id);
-        byte* row = _base + _dataOffset + (long)id * _vecStride;
+        long offset = _dataOffset + (long)id * _vecStride;
+        int length = _dim * sizeof(short);
+        if (_buffer is not null)
+            return MemoryMarshal.Cast<byte, Half>(
+                new ReadOnlySpan<byte>(_buffer, checked((int)(offset + IdBytes)), length));
+        byte* row = _base + offset;
         return new ReadOnlySpan<Half>(row + IdBytes, _dim);
     }
 
-    /// <summary>关闭并释放底层映射与文件句柄。</summary>
+    /// <summary>关闭并释放底层映射与文件句柄（full 模式同时丢弃内存缓冲区）。</summary>
     public void Close() => Dispose();
 
     public void Dispose()
     {
         _base = null;
+        _buffer = null;
         _view?.Dispose();
         _view = null;
         _mmf?.Dispose();

@@ -11,16 +11,22 @@ public sealed class SymbolIndex
     private readonly Dictionary<int, SymbolEntry> _byId;
     private readonly Dictionary<string, List<int>> _bySignature;
     private readonly Dictionary<string, List<int>> _byShortName;
+    private readonly int _count;
 
-    /// <summary>从条目列表构建索引。</summary>
-    public SymbolIndex(IReadOnlyList<SymbolEntry> entries)
+    /// <summary>
+    /// 从条目列表构建索引。列表下标即 id 空间；null 元素表示该 id 属于未启用分片（空洞）。
+    /// <paramref name="totalCount"/> 用于“只加载启用分片”时保留全量 id 空间。
+    /// </summary>
+    public SymbolIndex(IReadOnlyList<SymbolEntry?> entries, int? totalCount = null)
     {
+        _count = totalCount ?? entries.Count;
         _byId = new Dictionary<int, SymbolEntry>(entries.Count);
         _bySignature = new Dictionary<string, List<int>>(StringComparer.Ordinal);
         _byShortName = new Dictionary<string, List<int>>(StringComparer.Ordinal);
 
         foreach (var e in entries)
         {
+            if (e is null) continue;
             _byId[e.Id] = e;
             AddOrDefault(e.Signature, e.Id, _bySignature);
             AddOrDefault(e.ShortName, e.Id, _byShortName);
@@ -31,8 +37,11 @@ public sealed class SymbolIndex
     public static SymbolIndex LoadFromTsv(string tsvPath)
         => new(SymbolsTsv.Load(tsvPath));
 
-    /// <summary>索引条目总数。</summary>
-    public int Count => _byId.Count;
+    /// <summary>索引 id 空间大小（含未加载分片的空洞）。</summary>
+    public int Count => _count;
+
+    /// <summary>已加载的全部条目（按 id 无序）。</summary>
+    public IEnumerable<SymbolEntry> Entries => _byId.Values;
 
     private static void AddOrDefault(string key, int id, Dictionary<string, List<int>> map)
     {

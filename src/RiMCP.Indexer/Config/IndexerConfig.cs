@@ -13,7 +13,11 @@ public sealed class IndexerConfig
     /// <summary>RimWorldData 根目录（含 Assembly-CSharp 与 Data）。</summary>
     public required string Root { get; init; }
 
-    /// <summary>索引输出目录（默认 &lt;root&gt;/../index）。</summary>
+    /// <summary>
+    /// 索引输出目录（绝对路径）。解析优先级：<c>--index-dir</c> &gt; <c>--output</c> &gt;
+    /// 环境变量 <c>RIMCP_INDEX_DIR</c> &gt; 默认 <c>&lt;v2Root&gt;/index</c>。
+    /// 所有索引产物（build.json、分片目录、embedding-cache.tsv、.build/ 检查点）都基于此路径拼接。
+    /// </summary>
     public required string Output { get; init; }
 
     /// <summary>
@@ -52,6 +56,12 @@ public sealed class IndexerConfig
     /// <summary>仅从已有 symbols.tsv 生成图（graph.*），不重跑解析/嵌入/Lucene。</summary>
     public bool GraphOnly { get; init; }
 
+    /// <summary>增量构建（默认行为）；无旧 manifest / 旧格式 / 参数变化时自动回退全量。</summary>
+    public bool Incremental { get; init; } = true;
+
+    /// <summary>强制全量重建（忽略缓存映射表与检查点）。</summary>
+    public bool ForceClean { get; init; }
+
     /// <summary>
     /// RimWorldData 下 C# 源码的物理目录（相对 RimWorldData 根，含子目录结构）。
     /// 扫描后相对路径会去掉此前缀再套白名单；存入 FileRelPath 的仍是完整相对路径。
@@ -63,9 +73,6 @@ public sealed class IndexerConfig
 
     /// <summary>RimWorldData 下存放 XML Def 的子目录。</summary>
     public const string XmlSubDir = "Data";
-
-    /// <summary>默认输出目录相对 root 的路径。</summary>
-    private const string DefaultOutputRel = "../index";
 
     /// <summary>嵌入向量的维度（e5-base-v2 固定 768）。</summary>
     public const int Dim = 768;
@@ -92,9 +99,14 @@ public sealed class IndexerConfig
         if (!Directory.Exists(rootAbs))
             throw new InvalidOperationException($"RimWorldData 目录不存在：{rootAbs}");
 
-        string outputAbs = map.TryGet("output", out var outArg)
-            ? Path.GetFullPath(outArg)
-            : Path.GetFullPath(Path.Combine(rootAbs, DefaultOutputRel));
+        // 索引目录优先级：--index-dir > --output（兼容旧脚本）> RIMCP_INDEX_DIR > 默认 index。
+        // --index-dir / RIMCP_INDEX_DIR 支持目录名或绝对路径，统一由 PathUtil 解析。
+        map.TryGet("index-dir", out var indexDirArg);
+        string outputAbs = !string.IsNullOrWhiteSpace(indexDirArg)
+            ? PathUtil.GetIndexDirectory(v2Root, indexDirArg)
+            : map.TryGet("output", out var outArg)
+                ? Path.GetFullPath(outArg)
+                : PathUtil.GetIndexDirectory(v2Root);
 
         string modelDir = map.TryGet("model-dir", out var modelArg)
             ? Path.GetFullPath(modelArg)
@@ -105,6 +117,10 @@ public sealed class IndexerConfig
 
         // --graph-only：仅生成图，不要求模型存在
         bool graphOnly = args.Contains("--graph-only", StringComparer.OrdinalIgnoreCase);
+
+        // --force-clean 强制全量；--incremental 为默认（两者同时出现时以 force-clean 为准）
+        bool forceClean = args.Contains("--force-clean", StringComparer.OrdinalIgnoreCase);
+        bool incremental = !forceClean;
 
         if (!dryRun && !graphOnly)
         {
@@ -145,6 +161,8 @@ public sealed class IndexerConfig
             CSharpSourceSubdir = csharpSubdir,
             DryRun = dryRun,
             GraphOnly = graphOnly,
+            Incremental = incremental,
+            ForceClean = forceClean,
         };
     }
 

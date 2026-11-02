@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Xml;
 using System.Xml.Linq;
+using RiMCP.Core.Indexing;
 using RiMCP.Core.Models;
 
 namespace RiMCP.Indexer.Parsing;
@@ -45,6 +46,9 @@ public static class XmlParser
         return bag.ToList();
     }
 
+    // 注意：UpdateAdvisor 中有一套针对 XML 内容哈希的复刻实现用于环境诊断。
+    // 如果本处的 Def 提取规则（*Def 元素、defName、ParentName、signature 拼装）发生修改，
+    // 请务必同步更新 RiMCP.Core/Indexing/UpdateAdvisor.cs 中的 AddXmlFileEntries。
     /// <summary>解析单个 .xml 文件，每个 *Def 元素产出一条 <see cref="SymbolEntry"/>。</summary>
     public static IEnumerable<SymbolEntry> ParseFile(string fileAbs, string rootAbs)
     {
@@ -94,6 +98,7 @@ public static class XmlParser
                 DefLabel = defName,
                 ParentRef = parentRef,
                 Preview = preview,
+                EmbedText = ContentHash.CanonicalizeXml(element),
             };
 
             // Def 直接子元素中「有意义文本的叶子字段」→ XmlDefField
@@ -102,6 +107,10 @@ public static class XmlParser
         }
     }
 
+    // 注意：UpdateAdvisor 中有一套针对 XML 内容哈希的复刻实现用于环境诊断。
+    // 如果本处的 Def/DefField 提取规则发生修改，请务必同步更新
+    // RiMCP.Core/Indexing/UpdateAdvisor.cs 中的 ComputeXmlContentEntries/AddXmlFileEntries，
+    // 否则会把“仅属性换序”误判为内容变化（或反之）。
     /// <summary>
     /// 解析 Def 下的有值叶子子元素为 XmlDefField。规则：
     /// 仅直接子元素；叶子（无元素子节点）；文本 trim 后长度 ∈ [1,200]；跳过纯容器（statBases/comps/…）。
@@ -142,6 +151,7 @@ public static class XmlParser
                 DefLabel = value,
                 ParentRef = defSignature,
                 Preview = BuildPreview($"{defType}:{defName}.{childName} = {value}"),
+                EmbedText = ContentHash.CanonicalizeXml(child),
             };
         }
     }

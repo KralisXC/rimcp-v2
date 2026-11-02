@@ -13,8 +13,8 @@ public sealed class ShardManifest
     /// <summary>manifest schema 标识。</summary>
     public const string SchemaId = "rimcp-shard";
 
-    /// <summary>manifest 格式版本。</summary>
-    public const int CurrentFormatVersion = 1;
+    /// <summary>manifest 格式版本（阶段二全局图为 2）。</summary>
+    public const int CurrentFormatVersion = 2;
 
     /// <summary>层名常量（顺序稳定，写入与比对共用）。</summary>
     public static readonly IReadOnlyList<string> LayerNames = new[]
@@ -57,6 +57,12 @@ public sealed class ShardManifest
 
     /// <summary>嵌入模型标识。</summary>
     public string EmbeddingModel { get; set; } = string.Empty;
+
+    /// <summary>嵌入预处理修订号（内容哈希前缀，变化即全部向量失效）。</summary>
+    public int PreprocessingRevision { get; set; }
+
+    /// <summary>向量维度。</summary>
+    public int Dim { get; set; }
 
     /// <summary>各层逻辑哈希与构建时间。</summary>
     public Dictionary<string, LayerInfo> Layers { get; set; } = new(StringComparer.Ordinal);

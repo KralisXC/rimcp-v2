@@ -111,6 +111,7 @@ public static class GraphTools
                 TotalCount = total,
                 ReturnedCount = results.Count,
                 Truncated = total > cap,
+                TruncatedByDisabledShards = graph.TruncatedByDisabledShards,
                 Results = results,
             };
         }
@@ -141,6 +142,10 @@ public sealed record GraphResultDto
     public int TotalCount { get; set; }
     public int ReturnedCount { get; set; }
     public bool Truncated { get; set; }
+
+    /// <summary>是否因存在未启用分片而可能截断图查询结果（端点落在未启用 id 段的边已过滤）。</summary>
+    public bool TruncatedByDisabledShards { get; set; }
+
     public List<GraphHitDto> Results { get; set; } = new();
     public string? Error { get; set; }
 }

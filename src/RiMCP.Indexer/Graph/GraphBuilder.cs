@@ -4,20 +4,30 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
+using System.Xml.Linq;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Microsoft.CodeAnalysis.Text;
 using RiMCP.Core.Indexing;
 using RiMCP.Core.Models;
 using RiMCP.Indexer.Config;
 using RiMCP.Indexer.Parsing;
-using System.Xml.Linq;
 
 namespace RiMCP.Indexer.Graph;
 
+/// <summary>构图输入：一个分片的本地符号（列表下标即 localSeq）。</summary>
+internal sealed record ShardGraphInput(
+    string Name,
+    int Index,
+    long BaseId,
+    IReadOnlyList<SymbolEntry> Entries);
+
+/// <summary>统一构图结果（节点/边数）。</summary>
+internal sealed record GraphBuildResult(long NodeCount, long EdgeCount);
+
 /// <summary>
-/// P6：从已有 symbols.tsv 生成图（nodes/csr/csc/pagerank/meta）。
-/// 节点 = int id（symbols.tsv 行号）。C# 边用 Roslyn 语法分析 + (文件,起始行) 回填源符号 id。
+/// 阶段二：全局统一构图。节点 = 全部符号（全局 id 连续 0..N-1），边端点经
+/// <see cref="GlobalSymbolTable"/> 解析，允许跨分片（DLC Def 继承 core Def、DLC Def 绑定 core C# 类等）。
+/// 产物写入 index/graph/，分片目录不再保留 graph.*。
 /// </summary>
 internal sealed class GraphBuilder
 {
@@ -26,16 +36,20 @@ internal sealed class GraphBuilder
     private const int FormatVersion = 1;
 
     private readonly IndexerConfig _cfg;
-    private readonly string _shardDir;
+    private readonly string _graphDir;
+    private readonly IReadOnlyList<ShardGraphInput> _shards;
+    private readonly GlobalSymbolTable _table;
     private readonly bool _includeCSharp;
-    private readonly string _base; // &lt;shardDir&gt;/graph（各产物 = 该基名 + 扩展名）
 
-    public GraphBuilder(IndexerConfig cfg, string shardDir, bool includeCSharp = true)
+    public GraphBuilder(
+        IndexerConfig cfg, string graphDir,
+        IReadOnlyList<ShardGraphInput> shards, GlobalSymbolTable table, bool includeCSharp)
     {
         _cfg = cfg;
-        _shardDir = shardDir;
+        _graphDir = graphDir;
+        _shards = shards;
+        _table = table;
         _includeCSharp = includeCSharp;
-        _base = Path.Combine(shardDir, "graph");
     }
 
     private static readonly HashSet<SymbolKind> TypeKinds = new()
@@ -43,51 +57,92 @@ internal sealed class GraphBuilder
     private static readonly HashSet<SymbolKind> MemberKinds = new()
     { SymbolKind.CsMethod, SymbolKind.CsProperty, SymbolKind.CsField, SymbolKind.CsEvent };
 
-    /// <summary>运行图构建，返回有效边数。</summary>
-    public long Build()
+    private sealed record Node(int Id, string Shard, SymbolEntry Entry);
+
+    /// <summary>运行统一构图并写盘，返回节点/边数。</summary>
+    public GraphBuildResult Build()
     {
-        var index = SymbolIndex.LoadFromTsv(Path.Combine(_shardDir, "symbols.tsv"));
-        Console.WriteLine($"[P6] 载入 {index.Count} 条符号，开始构图…");
+        var nodes = BuildNodes();
+        Console.WriteLine($"[graph] 全局节点 {nodes.Count}，跨分片构图…");
 
         var edges = new ConcurrentBag<GraphEdge>();
         if (_includeCSharp)
-            CollectCSharpEdges(index, edges);
-        CollectXmlEdges(index, edges);
+            CollectCSharpEdges(nodes, edges);
+        CollectXmlEdges(nodes, edges);
 
         // 反向边：C# 类 ← XML Def
-        foreach (var e in edges)
+        foreach (var e in edges.ToArray())
+        {
             if (e.Kind == EdgeKinds.XmlBindsClass || e.Kind == EdgeKinds.XmlUsesComp)
                 edges.Add(new GraphEdge(e.TargetId, e.SourceId, EdgeKinds.CSharpUsedByDef));
+        }
 
         var all = edges.ToArray();
-        Write(index, all);
-        return all.LongLength;
+        Write(nodes, all);
+        return new GraphBuildResult(nodes.Count, all.LongLength);
+    }
+
+    private List<Node> BuildNodes()
+    {
+        int total = 0;
+        foreach (var shard in _shards) total = checked(total + shard.Entries.Count);
+        var nodes = new List<Node>(total);
+        for (int id = 0; id < total; id++) nodes.Add(null!);
+
+        foreach (var shard in _shards)
+        {
+            for (int local = 0; local < shard.Entries.Count; local++)
+            {
+                int globalId = checked((int)(shard.BaseId + local));
+                if (globalId < 0 || globalId >= total)
+                    throw new InvalidDataException($"全局 id {globalId} 越界（总分片符号数 {total}）。");
+                nodes[globalId] = new Node(globalId, shard.Name, shard.Entries[local]);
+            }
+        }
+
+        for (int i = 0; i < nodes.Count; i++)
+            if (nodes[i] is null)
+                throw new InvalidDataException($"全局节点 {i} 未分配符号，分片 BaseId 不连续。");
+        return nodes;
     }
 
     #region C# 边
-    private void CollectCSharpEdges(SymbolIndex index, ConcurrentBag<GraphEdge> edges)
+    private void CollectCSharpEdges(List<Node> nodes, ConcurrentBag<GraphEdge> edges)
     {
         var typeByShort = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
         var memberByShort = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
         var typeBySig = new Dictionary<string, int>(StringComparer.Ordinal);
-        var byLine = BuildLineIndex(index);
+        var byLine = BuildLineIndex(nodes);
 
-        for (int i = 0; i < index.Count; i++)
-            if (index.GetById(i) is { } e && e.Source == SourceType.CSharp)
+        foreach (var node in nodes)
+        {
+            var e = node.Entry;
+            if (e.Source != SourceType.CSharp) continue;
+            if (TypeKinds.Contains(e.Kind))
             {
-                if (TypeKinds.Contains(e.Kind)) { Add(typeByShort, e.ShortName, i); typeBySig[e.Signature] = i; }
-                else if (MemberKinds.Contains(e.Kind)) Add(memberByShort, e.ShortName, i);
+                Add(typeByShort, e.ShortName, node.Id);
+                typeBySig[e.Signature] = node.Id;
             }
+            else if (MemberKinds.Contains(e.Kind))
+            {
+                Add(memberByShort, e.ShortName, node.Id);
+            }
+        }
 
         string srcDir = Path.Combine(_cfg.Root, _cfg.CSharpSourceSubdir);
+        if (!Directory.Exists(srcDir))
+        {
+            Console.Error.WriteLine($"[graph] C# 源码目录不存在，跳过 C# 边：{srcDir}");
+            return;
+        }
         var files = Directory.EnumerateFiles(srcDir, "*.cs", SearchOption.AllDirectories)
             .Where(IsWhitelisted).ToArray();
-        Console.WriteLine($"[P6] 扫描 {files.Length} 个 C# 文件…");
+        Console.WriteLine($"[graph] 扫描 {files.Length} 个 C# 文件…");
 
         Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = _cfg.MaxParallelism }, file =>
         {
-            try { CollectEdgesInFile(file, index, byLine, typeByShort, memberByShort, typeBySig, edges); }
-            catch (Exception ex) { Console.Error.WriteLine($"[P6] {file}: {ex.Message}"); }
+            try { CollectEdgesInFile(file, byLine, typeByShort, memberByShort, typeBySig, edges); }
+            catch (Exception ex) { Console.Error.WriteLine($"[graph] {file}: {ex.Message}"); }
         });
     }
 
@@ -98,20 +153,23 @@ internal sealed class GraphBuilder
         if (body.StartsWith(_cfg.CSharpSourceSubdir + "/", StringComparison.Ordinal))
             body = body[(_cfg.CSharpSourceSubdir.Length + 1)..];
         int slash = body.IndexOf('/');
-        if (slash < 0) return true; // 源码根目录零散文件保留
+        if (slash < 0) return true;
         return _cfg.SourceIncludeRoots.Contains(body[..slash], StringComparer.OrdinalIgnoreCase);
     }
 
-    private Dictionary<(string, int), int> BuildLineIndex(SymbolIndex index)
+    private static Dictionary<(string, int), int> BuildLineIndex(List<Node> nodes)
     {
         var map = new Dictionary<(string, int), int>();
-        for (int i = 0; i < index.Count; i++)
-            if (index.GetById(i) is { } e && e.Source == SourceType.CSharp && e.LineStart > 0)
-                map[(e.FileRelPath ?? "", e.LineStart)] = i;
+        foreach (var node in nodes)
+        {
+            var e = node.Entry;
+            if (e.Source == SourceType.CSharp && e.LineStart > 0)
+                map[(e.FileRelPath ?? "", e.LineStart)] = node.Id;
+        }
         return map;
     }
 
-    private void CollectEdgesInFile(string file, SymbolIndex index,
+    private void CollectEdgesInFile(string file,
         Dictionary<(string, int), int> byLine,
         Dictionary<string, List<int>> typeByShort, Dictionary<string, List<int>> memberByShort,
         Dictionary<string, int> typeBySig, ConcurrentBag<GraphEdge> edges)
@@ -121,7 +179,7 @@ internal sealed class GraphBuilder
         var root = tree.GetRoot();
 
         foreach (var type in root.DescendantNodes().OfType<TypeDeclarationSyntax>()
-                     .Where(t => t.Parent is not TypeDeclarationSyntax)) // 跳过嵌套类型，避免重复
+                     .Where(t => t.Parent is not TypeDeclarationSyntax))
         {
             var srcId = LineId(byLine, rel, type);
             if (srcId < 0) continue;
@@ -164,21 +222,21 @@ internal sealed class GraphBuilder
         }
     }
 
-    private static int LineId(Dictionary<(string, int), int> byLine, string rel, Microsoft.CodeAnalysis.SyntaxNode node)
+    private static int LineId(Dictionary<(string, int), int> byLine, string rel,
+        Microsoft.CodeAnalysis.SyntaxNode node)
     {
-        var pos = node.SyntaxTree.GetLineSpan(node.Span); // 用 SyntaxTree.GetLineSpan 保证非零
+        var pos = node.SyntaxTree.GetLineSpan(node.Span);
         return byLine.TryGetValue((rel, pos.StartLinePosition.Line + 1), out var id) ? id : -1;
     }
 
-    private static IEnumerable<int> ResolveType(string name, Dictionary<string, List<int>> byShort, Dictionary<string, int> bySig)
+    private static IEnumerable<int> ResolveType(string name,
+        Dictionary<string, List<int>> byShort, Dictionary<string, int> bySig)
     {
         var clean = name.Split('<')[0];
-        // 完全限定名 signature 精确命中即返回，不做短名二义判断（真实限定名边不应被误杀）
         if (bySig.TryGetValue(clean, out var exact)) { yield return exact; yield break; }
 
         int dot = clean.LastIndexOf('.');
         var shortName = dot >= 0 ? clean[(dot + 1)..] : clean;
-        // 短名二义候选 > 2 => 忽略
         if (byShort.TryGetValue(shortName, out var hits) && hits.Count <= 2)
             foreach (var h in hits) yield return h;
     }
@@ -188,7 +246,6 @@ internal sealed class GraphBuilder
         var clean = name.Split('<')[0];
         int dot = clean.LastIndexOf('.');
         var shortName = dot >= 0 ? clean[(dot + 1)..] : clean;
-        // 短名二义候选 > 2 => 忽略（跨类同名是假边）
         if (byShort.TryGetValue(shortName, out var hits) && hits.Count <= 2)
             foreach (var h in hits) yield return h;
     }
@@ -202,45 +259,65 @@ internal sealed class GraphBuilder
     #endregion
 
     #region XML 边
-    private void CollectXmlEdges(SymbolIndex index, ConcurrentBag<GraphEdge> edges)
+    private void CollectXmlEdges(List<Node> nodes, ConcurrentBag<GraphEdge> edges)
     {
-        var xmlById = new Dictionary<int, SymbolEntry>();
-        var xmlBySig = new Dictionary<string, int>(StringComparer.Ordinal);
-        for (int i = 0; i < index.Count; i++)
-            if (index.GetById(i) is { } e && e.Source == SourceType.Xml && e.Kind == SymbolKind.XmlDef)
-            { xmlById[i] = e; xmlBySig[e.Signature] = i; }
+        var xmlDefs = nodes.Where(n => n.Entry.Source == SourceType.Xml &&
+                                        n.Entry.Kind == SymbolKind.XmlDef).ToList();
 
-        // xml-inherits：直接由 ParentRef（父 Def 签名）解析，无需读文件
-        foreach (var (defId, e) in xmlById)
-            if (!string.IsNullOrEmpty(e.ParentRef) && xmlBySig.TryGetValue(e.ParentRef, out var pid))
-                edges.Add(new GraphEdge(defId, pid, EdgeKinds.XmlInherits));
+        // xml-inherits：ParentRef 经全局覆盖表解析（core 指向被覆盖 Def 的边落到 DLC 覆盖条目）
+        foreach (var node in xmlDefs)
+        {
+            string? parent = node.Entry.ParentRef;
+            if (string.IsNullOrEmpty(parent)) continue;
+            int pid = _table.ResolveSignature(parent);
+            if (pid >= 0) edges.Add(new GraphEdge(node.Id, pid, EdgeKinds.XmlInherits));
+        }
 
-        // xml-binds-class：按文件分组解析 Class 属性 → C# 类型
-        var byFile = xmlById.Values.GroupBy(e => e.FileRelPath ?? "", StringComparer.Ordinal);
+        // C# 类型解析表（XML Def 的 Class 属性 → 全局 C# 类型）
+        var csTypesByShort = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
+        var csTypesBySig = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var node in nodes)
+        {
+            var e = node.Entry;
+            if (e.Source != SourceType.CSharp || !TypeKinds.Contains(e.Kind)) continue;
+            Add(csTypesByShort, e.ShortName, node.Id);
+            csTypesBySig[e.Signature] = node.Id;
+        }
+
+        // xml-binds-class：按 (分片, 文件) 分组读取 Class 属性
+        var byFile = xmlDefs.GroupBy(n => (n.Shard, n.Entry.FileRelPath ?? ""));
         Parallel.ForEach(byFile, new ParallelOptions { MaxDegreeOfParallelism = _cfg.MaxParallelism }, grp =>
         {
-            var path = Path.Combine(_cfg.Root, grp.Key.Replace('/', Path.DirectorySeparatorChar));
+            var (_, rel) = grp.Key;
+            if (rel.Length == 0) return;
+            var path = Path.Combine(_cfg.Root, rel.Replace('/', Path.DirectorySeparatorChar));
             if (!File.Exists(path)) return;
             XDocument doc;
             try { doc = XDocument.Load(path, LoadOptions.SetLineInfo); }
             catch { return; }
 
-            var typeKinds = TypeKinds;
-            foreach (var e in grp)
+            foreach (var node in grp)
             {
-                var defNode = FindDefWithName(doc, e.ShortName);
+                var defNode = FindDefWithName(doc, node.Entry.ShortName);
                 if (defNode == null) continue;
                 var classAttr = defNode.Attribute("Class")?.Value ?? string.Empty;
-                string target = SplitLineFirst(classAttr);
-                int dot = target.LastIndexOf('.');
-                var shortName = dot >= 0 ? target[(dot + 1)..] : target;
-                for (int i = 0; i < index.Count; i++)
-                    if (index.GetById(i) is { } cs && cs.Source == SourceType.CSharp && typeKinds.Contains(cs.Kind) &&
-                        (cs.ShortName.Equals(shortName, StringComparison.OrdinalIgnoreCase) ||
-                         cs.Signature.Equals(target, StringComparison.Ordinal)))
-                        edges.Add(new GraphEdge(e.Id, i, EdgeKinds.XmlBindsClass));
+                foreach (var target in ResolveCsType(classAttr, csTypesByShort, csTypesBySig))
+                    edges.Add(new GraphEdge(node.Id, target, EdgeKinds.XmlBindsClass));
             }
         });
+    }
+
+    private static IEnumerable<int> ResolveCsType(
+        string classAttr, Dictionary<string, List<int>> byShort, Dictionary<string, int> bySig)
+    {
+        string target = SplitLineFirst(classAttr.Trim());
+        if (target.Length == 0) yield break;
+        if (bySig.TryGetValue(target, out var exact)) { yield return exact; yield break; }
+
+        int dot = target.LastIndexOf('.');
+        var shortName = dot >= 0 ? target[(dot + 1)..] : target;
+        if (byShort.TryGetValue(shortName, out var hits) && hits.Count <= 2)
+            foreach (var h in hits) yield return h;
     }
 
     private static string SplitLineFirst(string s)
@@ -259,9 +336,10 @@ internal sealed class GraphBuilder
     #endregion
 
     #region 写盘
-    private void Write(SymbolIndex index, IReadOnlyList<GraphEdge> edges)
+    private void Write(List<Node> nodes, IReadOnlyList<GraphEdge> edges)
     {
-        var nodeCount = index.Count;
+        Directory.CreateDirectory(_graphDir);
+        var nodeCount = nodes.Count;
         var rowCounts = new int[nodeCount];
         var colCounts = new int[nodeCount];
         int valid = 0;
@@ -285,11 +363,11 @@ internal sealed class GraphBuilder
             w++;
         }
 
-        WriteBinary(_base + ".csr.bin", CsrMagic, nodeCount, w, csrPointers, csrCols, csrKinds);
-        WriteBinary(_base + ".csc.bin", CscMagic, nodeCount, w, cscPointers, cscRows, cscKinds);
-        WriteNodes(index);
+        WriteBinary(Path.Combine(_graphDir, "graph.csr.bin"), CsrMagic, nodeCount, w, csrPointers, csrCols, csrKinds);
+        WriteBinary(Path.Combine(_graphDir, "graph.csc.bin"), CscMagic, nodeCount, w, cscPointers, cscRows, cscKinds);
+        WriteNodes(nodes);
         WriteMeta(nodeCount, w);
-        WritePagerank(index, nodeCount, csrPointers, csrCols);
+        WritePagerank(nodes, nodeCount, csrPointers, csrCols);
     }
 
     private static int[] BuildPointers(int[] counts)
@@ -299,9 +377,11 @@ internal sealed class GraphBuilder
         return p;
     }
 
-    private void WriteBinary(string path, string magic, int nodeCount, int edgeCount, int[] pointers, int[] indices, byte[] kinds)
+    private static void WriteBinary(string path, string magic, int nodeCount, int edgeCount,
+        int[] pointers, int[] indices, byte[] kinds)
     {
-        using var w = new BinaryWriter(new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20), Encoding.UTF8);
+        using var w = new BinaryWriter(
+            new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20), Encoding.UTF8);
         w.Write(Encoding.ASCII.GetBytes(magic)); w.Write(FormatVersion);
         w.Write(nodeCount); w.Write(edgeCount);
         foreach (var p in pointers) w.Write(p);
@@ -309,27 +389,31 @@ internal sealed class GraphBuilder
         w.Write(kinds.Length); w.Write(kinds);
     }
 
-    private void WriteNodes(SymbolIndex index)
+    private void WriteNodes(List<Node> nodes)
     {
-        using var w = new StreamWriter(_base + ".nodes.tsv", false, new UTF8Encoding(false));
-        for (int i = 0; i < index.Count; i++)
-            w.Write(i.ToString(CultureInfo.InvariantCulture) + "\t" + (index.GetById(i)?.Signature ?? "") + "\n");
+        using var w = new StreamWriter(
+            Path.Combine(_graphDir, "graph.nodes.tsv"), false, new UTF8Encoding(false));
+        foreach (var node in nodes)
+            w.Write(node.Id.ToString(CultureInfo.InvariantCulture) + "\t"
+                    + (node.Entry?.Signature ?? "") + "\t" + node.Shard + "\n");
     }
 
     private void WriteMeta(int nodeCount, int edgeCount)
     {
         var kinds = "[\"" + string.Join("\", \"", EdgeKinds.Names) + "\"]";
-        File.WriteAllText(_base + ".meta.json",
-            $"{{\"nodeCount\":{nodeCount},\"edgeCount\":{edgeCount},\"edgeKinds\":{kinds}}}");
+        File.WriteAllText(Path.Combine(_graphDir, "graph.meta.json"),
+            $"{{\"nodeCount\":{nodeCount},\"edgeCount\":{edgeCount},\"edgeKinds\":{kinds}," +
+            "\"crossShard\":true,\"formatVersion\":1}");
     }
 
-    private void WritePagerank(SymbolIndex index, int nodeCount, int[] csrPointers, int[] csrCols)
+    private void WritePagerank(List<Node> nodes, int nodeCount, int[] csrPointers, int[] csrCols)
     {
         var scores = PageRank.Calculate(nodeCount, csrPointers, csrCols);
-        using var w = new StreamWriter(_base + ".pagerank.tsv", false, new UTF8Encoding(false));
+        using var w = new StreamWriter(
+            Path.Combine(_graphDir, "graph.pagerank.tsv"), false, new UTF8Encoding(false));
         var ranked = Enumerable.Range(0, nodeCount)
             .OrderByDescending(i => scores[i])
-            .Select(i => $"{index.GetById(i)?.Signature ?? ""}\t{scores[i]:F6}");
+            .Select(i => $"{i}\t{nodes[i].Entry?.Signature ?? ""}\t{scores[i]:F6}");
         foreach (var line in ranked) w.WriteLine(line);
     }
     #endregion

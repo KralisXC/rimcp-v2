@@ -82,6 +82,18 @@ public static class ManifestComparer
             details.Add($"向量精度不符：manifest={manifest.Precision}，当前={env.Precision}");
             needsRebuild = true;
         }
+        if (manifest.Dim != 0 && manifest.Dim != env.Dim)
+        {
+            details.Add($"向量维度不符：manifest={manifest.Dim}，当前={env.Dim}");
+            needsRebuild = true;
+        }
+        if (manifest.PreprocessingRevision != 0 &&
+            manifest.PreprocessingRevision != ShardCatalog.EmbeddingPreprocessingRevision)
+        {
+            details.Add(
+                $"嵌入预处理 revision 不符：manifest={manifest.PreprocessingRevision}，当前={ShardCatalog.EmbeddingPreprocessingRevision}");
+            needsRebuild = true;
+        }
         if (!manifest.OnnxProvider.Equals(env.OnnxProvider, StringComparison.OrdinalIgnoreCase))
             details.Add($"provider 不同：manifest={manifest.OnnxProvider}，当前={env.OnnxProvider}（不影响向量复用）");
         if (!manifest.SourceHash.Equals(env.SourceHash, StringComparison.Ordinal))

@@ -1,20 +1,28 @@
-# 索引产物（可由 RiMCP.Indexer 重建）
-index/
-
-# ONNX 模型（体积大，单独分发）
-models/
-
-# RimWorld 游戏数据与反编译源码（版权与体积原因不入库）
-RimWorldData/
-
-# .NET 构建产物
+# 忽略构建产物
 bin/
 obj/
 .vs/
 
-# 截图等临时产物
-.screenshots/
+# Launcher 发布产物（build.bat 生成，可直接双击 app/RiMCP.Launcher.exe）
+/app/
 
-# 用户本地配置
+# 开发报告与设计文档（本地保留，不随仓库分发）
+/docs/
+
+# 忽略本地数据与索引（包含多版本隔离目录）
+# 仅匹配仓库根目录，避免误伤 src/RiMCP.Core/Models 等源码目录
+/RimWorldData/
+/models/
+/index/
+/index_*/
+/.build/
+
+# 忽略本地配置
+appsettings.json
+# Launcher 的默认配置模板需要入库，否则克隆后没有初始配置
+!src/RiMCP.Launcher/appsettings.json
 *.user
 *.suo
+
+# 截图等临时产物
+.screenshots/

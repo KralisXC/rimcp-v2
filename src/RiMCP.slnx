@@ -2,5 +2,6 @@
   <Project Path="RiMCP.Core/RiMCP.Core.csproj" />
   <Project Path="RiMCP.CoreTests/RiMCP.CoreTests.csproj" />
   <Project Path="RiMCP.Indexer/RiMCP.Indexer.csproj" />
+  <Project Path="RiMCP.Launcher/RiMCP.Launcher.csproj" />
   <Project Path="RiMCP.McpServer/RiMCP.McpServer.csproj" />
 </Solution>

@@ -137,6 +137,42 @@ public static class ShardCatalog
             LayerHashes.Compute(sourceHash, embeddingModel, dim, precision));
     }
 
+    /// <summary>
+    /// 一次计算全部分片在当前环境下的期望值。graph 层使用全局统一图哈希
+    /// （由所有分片 symbols 层哈希合成），保证跨分片边与任一分片符号变化都被覆盖。
+    /// Indexer 与 McpServer 必须共用本方法，禁止各写一套。
+    /// </summary>
+    public static IReadOnlyList<ShardEnvironment> BuildEnvironments(
+        IReadOnlyList<ShardSource> shards, string rootAbs, string gameVersion, string onnxProvider,
+        string precision, string embeddingModel, int dim, string builderCommit)
+    {
+        var local = new List<ShardEnvironment>(shards.Count);
+        foreach (var shard in shards)
+        {
+            local.Add(BuildEnvironment(
+                shard, rootAbs, gameVersion, onnxProvider, precision,
+                embeddingModel, dim, builderCommit));
+        }
+
+        string globalSymbolsHash = LayerHashes.ComputeGlobalSymbolsHash(
+            local.Select(e => (e.ShardName, e.LayerHashes[LayerHashes.Symbols])));
+        string globalGraphHash = LayerHashes.ComputeGlobalGraphHash(globalSymbolsHash);
+
+        var result = new List<ShardEnvironment>(local.Count);
+        foreach (var env in local)
+        {
+            var hashes = new Dictionary<string, string>(env.LayerHashes, StringComparer.Ordinal)
+            {
+                [LayerHashes.Graph] = globalGraphHash,
+            };
+            result.Add(new ShardEnvironment(
+                env.ShardName, env.ShardIndex, env.GameVersion, env.SourceHash,
+                env.OnnxProvider, env.Precision, env.EmbeddingModel, env.Dim,
+                env.BuilderCommit, hashes));
+        }
+        return result;
+    }
+
     /// <summary>该分片 Def + 程序集文件的内容哈希。</summary>
     public static string ComputeSourceHash(string rootAbs, ShardSource shard)
         => SourceHasher.HashFiles(rootAbs, shard.XmlFiles.Concat(shard.AssemblyFiles));
@@ -178,6 +214,22 @@ public static class ShardCatalog
         /// <summary>由既有 symbols 层哈希推导 graph 层哈希（--graph-only 复用符号层时使用）。</summary>
         public static string GraphFromSymbols(string symbolsHash)
             => Hash($"graph|{symbolsHash}|graph={GraphRevision}");
+
+        /// <summary>
+        /// 全局符号表哈希：H(sorted(join(shard|symbolsHash)))。任一分片符号变化都会使全局图失效。
+        /// </summary>
+        public static string ComputeGlobalSymbolsHash(IEnumerable<(string Shard, string SymbolsHash)> shards)
+        {
+            var joined = string.Join(
+                "\n",
+                shards.OrderBy(s => s.Shard, StringComparer.Ordinal)
+                      .Select(s => $"{s.Shard}|{s.SymbolsHash}"));
+            return Hash(joined);
+        }
+
+        /// <summary>全局图哈希：跨分片边参与输入，避免“分片 hash 都没变但图变了”的漏判。</summary>
+        public static string ComputeGlobalGraphHash(string globalSymbolsHash)
+            => Hash($"graph|{globalSymbolsHash}|graph={GraphRevision}|cross-shard=1");
 
         private static string Hash(string text)
             => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();

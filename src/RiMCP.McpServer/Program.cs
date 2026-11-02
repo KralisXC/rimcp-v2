@@ -20,9 +20,40 @@ using RiMCP.McpServer.Services;
 // ---- 1. 路径解析 ------------------------------------------------------------
 string rootArg = Environment.GetEnvironmentVariable("RIMCP_ROOT") ?? @"F:\KXMOD\RiMCP_v2";
 string v2Root = PathUtil.LocateRoot(rootArg);   // 校验同时含 RimWorldData 与 models
-string indexDir = Path.Combine(v2Root, "index");
+
+// ---- 1.2 索引目录：--index-dir > RIMCP_INDEX_DIR > index -------------------
+string? cliIndexDir = null;
+for (int i = 0; i < args.Length; i++)
+{
+    string a = args[i];
+    if (a.Equals("--index-dir", StringComparison.OrdinalIgnoreCase))
+    {
+        if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+            cliIndexDir = args[i + 1];
+    }
+    else if (a.StartsWith("--index-dir=", StringComparison.OrdinalIgnoreCase))
+    {
+        cliIndexDir = a["--index-dir=".Length..];
+    }
+}
+string indexDir = PathUtil.GetIndexDirectory(v2Root, cliIndexDir);
+Console.Error.WriteLine($"[load] 使用索引目录: {indexDir}");
+
 string modelDir = Environment.GetEnvironmentVariable("RIMCP_MODEL_PATH")
     ?? Path.Combine(v2Root, "models", "e5-base-v2-onnx");
+
+// ---- 1.5 加载模式：--load-mode > RIMCP_LOAD_MODE > mmap --------------------
+string loadMode;
+try
+{
+    loadMode = LoadModes.Resolve(args);
+}
+catch (ArgumentException ex)
+{
+    Console.Error.WriteLine($"[load] {ex.Message}");
+    Environment.Exit(2);
+    return;
+}
 
 // ---- 2. Host + 日志（stdout 是 MCP 协议通道，日志只能走 stderr）-------------
 var builder = Host.CreateApplicationBuilder(args);
@@ -31,9 +62,10 @@ builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Informa
 
 // ---- 3. 核心服务 ------------------------------------------------------------
 // IndexService：启动时一次性加载 build.json 校验 → SymbolIndex(symbols.tsv) →
-//              mmap vectors.bin → 打开 Lucene 目录 → 加载 ONNX 模型 + tokenizer。
+//              mmap（或 full 全量读入）vectors.bin → 打开 Lucene 目录（full 转 RAMDirectory）
+//              → 加载 ONNX 模型 + tokenizer。
 //              用 Lazy/延迟初始化，让 MCP 握手在后台完成、首个工具调用前就绪。
-builder.Services.AddSingleton(sp => new IndexService(v2Root, indexDir, modelDir));
+builder.Services.AddSingleton(sp => new IndexService(v2Root, indexDir, modelDir, loadMode));
 builder.Services.AddSingleton<QueryEmbedding>();  // 查询侧 "query: " 前缀 + WordPiece + 池化
 builder.Services.AddSingleton<GraphService>();    // 加载 graph.csr.bin / csc.bin / nodes / pagerank
 
