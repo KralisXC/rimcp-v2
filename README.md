@@ -24,12 +24,12 @@ ONNX 模型默认放在 `models/e5-base-v2-onnx/`，包含 `model.onnx` 与 toke
 
 ## 快速开始
 
-1. 准备目录（大文件不入库，需自行准备）：
+1. 准备本地数据：首次运行前，请在根目录下准备好 `models/` 与 `RimWorldData/` 两个文件夹（它们已被 `.gitignore` 排除，不会随仓库下载，需自行放置）。
 
 ```text
 RiMCP_v2/
-├─ RimWorldData/          # RimWorld 游戏数据与反编译源码
-├─ models/                # e5-base-v2-onnx 模型
+├─ RimWorldData/          # 需自行准备：RimWorld Data 与反编译源码（不入库）
+├─ models/                # 需自行准备：e5-base-v2-onnx 模型（不入库）
 ├─ index/                 # 默认索引产物（构建生成）
 ├─ src/                   # 源代码
 ├─ app/                   # Launcher 发布产物（build.bat 生成）

@@ -11,8 +11,11 @@ obj/
 
 # 忽略本地数据与索引（包含多版本隔离目录）
 # 仅匹配仓库根目录，避免误伤 src/RiMCP.Core/Models 等源码目录
-/RimWorldData/
-/models/
+# 两个数据目录的内容全部忽略，但保留占位说明 README.md
+/RimWorldData/*
+!/RimWorldData/README.md
+/models/*
+!/models/README.md
 /index/
 /index_*/
 /.build/
