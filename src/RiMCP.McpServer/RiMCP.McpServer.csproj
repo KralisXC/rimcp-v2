@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>RiMCP.McpServer</RootNamespace>
+    <AssemblyName>RiMCP.McpServer</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- stdio 服务器不需要生成宿主启动器 -->
+    <UseAppHost>true</UseAppHost>
+    <!-- ONNX 后端编译期选择：CUDA(默认) / DirectML / CPU -->
+    <OnnxBackend Condition="'$(OnnxBackend)' == ''">CUDA</OnnxBackend>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(OnnxBackend)' == 'DirectML'">
+    <DefineConstants>$(DefineConstants);DIRECTML</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RiMCP.Core\RiMCP.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 版本对齐旧 McpWrapper 解析到的 ModelContextProtocol 2.2.0，不用预览版 -->
+    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
+    <PackageReference Include="Lucene.Net" Version="4.8.0-beta00016" />
+    <PackageReference Include="Lucene.Net.Analysis.Common" Version="4.8.0-beta00016" />
+    <PackageReference Include="Lucene.Net.QueryParser" Version="4.8.0-beta00016" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(OnnxBackend)' == 'CUDA'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.30.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(OnnxBackend)' == 'DirectML'">
+    <!-- DirectML 包发布节奏较慢，最高可用 1.24.4（其余后端为 1.30.0） -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(OnnxBackend)' == 'CPU'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <RootNamespace>RiMCP.Indexer</RootNamespace>
+    <!-- ONNX 后端编译期选择：CUDA(默认) / DirectML / CPU -->
+    <OnnxBackend Condition="'$(OnnxBackend)' == ''">CUDA</OnnxBackend>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(OnnxBackend)' == 'DirectML'">
+    <DefineConstants>$(DefineConstants);DIRECTML</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RiMCP.Core\RiMCP.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
+    <PackageReference Include="Lucene.Net" Version="4.8.0-beta00016" />
+    <PackageReference Include="Lucene.Net.Analysis.Common" Version="4.8.0-beta00016" />
+    <PackageReference Include="Lucene.Net.QueryParser" Version="4.8.0-beta00016" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(OnnxBackend)' == 'CUDA'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.30.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(OnnxBackend)' == 'DirectML'">
+    <!-- DirectML 包发布节奏较慢，最高可用 1.24.4（其余后端为 1.30.0） -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(OnnxBackend)' == 'CPU'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0" />
+  </ItemGroup>
+
+</Project>

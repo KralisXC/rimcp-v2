@@ -1,0 +1,20 @@
+# 索引产物（可由 RiMCP.Indexer 重建）
+index/
+
+# ONNX 模型（体积大，单独分发）
+models/
+
+# RimWorld 游戏数据与反编译源码（版权与体积原因不入库）
+RimWorldData/
+
+# .NET 构建产物
+bin/
+obj/
+.vs/
+
+# 截图等临时产物
+.screenshots/
+
+# 用户本地配置
+*.user
+*.suo
