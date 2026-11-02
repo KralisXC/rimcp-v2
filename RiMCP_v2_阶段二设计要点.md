@@ -15,6 +15,7 @@
    - 全局 id 分配顺序：`core` 占 `0..Nc-1`，DLC 按 `shardIndex` 依次追加 —— 与阶段一一致，保证 MCP 已有 id 稳定。
    - 产出 `signature → globalId` 映射。
    - **同名 XML Def 覆盖**：高 `shardIndex` 的分片覆盖低序分片的映射项；覆盖只影响“端点解析”和“查询 overlay”，**不删除** core 条目（`symbols.tsv` 仍保留，搜索结果可列出两条）。
+   - **core 内部指向被覆盖 Def 的边，端点解析到 DLC 覆盖条目**（即覆盖映射对全区生效，不区分边源来自哪个分片）。
    - 产出 `(shard, localSeq) → globalId` 映射，供构图与 Lucene 写入。
 3. **统一构图**（单次，不再按分片构图）
    - 节点 = 全部符号（全局 id 连续 0..N-1）。
@@ -68,19 +69,19 @@ contentHash = SHA256(
 
 - `normalizedText`：
   - C#：`signature + "\n" + preview`，统一行尾为 `\n`、去掉行尾空白、连续空行折叠。
-  - XML Def：规范化后的 Def 文本，去掉缩进差异与注释，属性/元素顺序保持原样（顺序影响语义）。
+  - XML Def：规范化后的 Def 文本，去掉缩进差异与注释；元素顺序保留，**属性按名称排序后再拼接**。
 - 模型名、维度、精度、预处理 revision 任一变化 → 全部哈希失效 → 自动全量。
 
 ### 映射表
 
 - 路径：`index/embedding-cache.tsv`
-- 结构：`contentHash \t globalId`（幂等、可整体重写）
+- 结构：`contentHash \t shardName \t localId`（**禁止用 globalId 作 key**）
 - 构建时：
-  1. 读旧表 + 旧 `build.json`，把 `globalId` 解析为 `(旧分片, 旧本地 id)`，定位旧 `vectors.bin` 记录。
+  1. 读旧表 + 旧 `build.json`，按 `(shardName, localId)` 定位旧 `vectors.bin` 记录。
   2. 逐符号计算 `contentHash`：
-     - 命中且旧记录可读 → 直接复制该向量（不跑 ONNX）。
-     - 未命中 → 进入当前批次送 ONNX。
-  3. 全部完成后**整体重写**新表（只保留本次仍存在的 hash）。
+     - 命中且旧记录可读 → **先一次性复制全部命中向量**（不跑 ONNX）。
+     - 未命中 → 收集起来，复制阶段结束后分批送 ONNX。
+  3. 全部完成后**整体重写**新表（只保留本次仍存在的 hash，键仍为 `(shardName, localId)`）。
 - **淘汰**：删除/改名符号的哈希不再出现在新表中，其旧向量也不会写入新 `vectors.bin`，即自然淘汰；不做墓碑记录。
 
 ### 回退规则
@@ -97,12 +98,12 @@ contentHash = SHA256(
 ### 检查点与续跑
 
 - 目录：`index/.build/`
-- 每完成一个批次，追加写 `checkpoint.tsv`：`batchNo \t contentHash1,contentHash2,... \t writtenIds`
+- 检查点**只覆盖 ONNX 计算阶段**，每完成一个批次追加写 `checkpoint.tsv`：`batchNo \t contentHash1,contentHash2,...`
 - 恢复时：
-  1. 读 `checkpoint.tsv`，得到已提交批次与期望已写记录数；
-  2. 校验当前 `vectors.bin` 的 id 从 0 连续、记录数 = 已提交批次的累计条数；
-  3. 连续则从下一批继续；不连续则丢弃该检查点，嵌入层整体重跑；
-  4. 检查点在同一构建成功后删除。
+  1. 校验当前 `vectors.bin` 的 id 从 0 连续，且记录数等于**全量符号数**（复制阶段已完整写入）；
+  2. 不连续/条数不符 → 丢弃检查点，嵌入层整体重跑；
+  3. 连续则把 checkpoint 中的哈希视为已完成，只对剩余未命中符号续跑 ONNX；
+  4. 构建成功后删除检查点。
 - 已处理哈希不重复计算：恢复时把 checkpoint 中的哈希视为已完成。
 
 ### 分层触发
@@ -128,6 +129,7 @@ Def 解析 → 符号提取 → 全局符号合并 → 嵌入计算 → Lucene �
   2. 否则读 `build.json.enabledShards`；
   3. 两者都没有 → **报错并要求显式配置**，不自行推断“全部加载”。
 - 只加载启用分片；`BaseId` 区间仍按 build.json 的**全量布局**保留，未启用分片的 id 段在查询层表现为空洞（`EntryOf` 返回 null），保证镜像切换时 id 不漂移。
+- **GraphService 加载全局图时，一次性过滤端点在未启用分片 id 段内的边**；查询结果只返回已启用分片内的节点，并标注 `truncatedByDisabledShards: true`（不返回悬空 id、不返回 null、不报错）。
 - 启用的分片名校验：不在 build.json `shards` 中的名字视为配置错误，启动即报错。
 - 查询顺序：先 `core`，再按 `enabledShards` 顺序合并覆盖层；同名 Def 覆盖规则与 A.2 一致。
 
