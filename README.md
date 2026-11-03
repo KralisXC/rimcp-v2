@@ -13,7 +13,7 @@
 | NVIDIA 驱动 | 最新 Game Ready / Studio 驱动 | 使用 CUDA 时必需 |
 | CUDA Toolkit | **12.8（最低 12.x）** | ONNX Runtime 1.22.0 的 GPU 包按 CUDA 12.8 构建，需安装 12.8 或更新版本 |
 | cuDNN | **9.x** | 需与 CUDA 12.8 配套，放置到系统 PATH 或 CUDA 目录 |
-| 显卡 | 兼容新老架构 | 实测覆盖 RTX 4050 与 GTX 1080Ti |
+| 显卡 | 兼容新老架构 | 实测覆盖 RTX 4050 |
 
 CUDA 12.8 仍支持 Pascal 架构（如 GTX 1080Ti）；若旧显卡遇到兼容问题，请在 Launcher 中选择 directml 或 cpu provider（DirectML 需以 `-p:OnnxBackend=DirectML` 重新构建）。
 
@@ -73,12 +73,12 @@ RiMCP_v2/
       "args": [
         "run",
         "--project",
-        "E:\\KMODS\\RiMCP_v2_3\\src\\RiMCP.McpServer\\RiMCP.McpServer.csproj",
+        "E:\\RiMCP_v2_3\\src\\RiMCP.McpServer\\RiMCP.McpServer.csproj",
         "-c",
         "Release"
       ],
       "env": {
-        "RIMCP_ROOT": "E:\\KMODS\\RiMCP_v2_3",
+        "RIMCP_ROOT": "E:\\RiMCP_v2_3",
         "RIMCP_LOAD_MODE": "full",
         "RIMCP_INDEX_DIR": "index_17",
         "RIMCP_ONNX_PROVIDER": "cpu"
