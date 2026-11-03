@@ -128,9 +128,10 @@ public static class ShardCatalog
     /// <summary>构建一个分片在当前环境下的期望值（来源哈希 + 五层哈希）。</summary>
     public static ShardEnvironment BuildEnvironment(
         ShardSource shard, string rootAbs, string gameVersion, string onnxProvider,
-        string precision, string embeddingModel, int dim, string builderCommit)
+        string precision, string embeddingModel, int dim, string builderCommit,
+        ProbeCache? probeCache = null)
     {
-        string sourceHash = ComputeSourceHash(rootAbs, shard);
+        string sourceHash = ComputeSourceHash(rootAbs, shard, probeCache);
         return new ShardEnvironment(
             shard.Name, shard.Index, gameVersion, sourceHash, onnxProvider, precision,
             embeddingModel, dim, builderCommit,
@@ -144,14 +145,15 @@ public static class ShardCatalog
     /// </summary>
     public static IReadOnlyList<ShardEnvironment> BuildEnvironments(
         IReadOnlyList<ShardSource> shards, string rootAbs, string gameVersion, string onnxProvider,
-        string precision, string embeddingModel, int dim, string builderCommit)
+        string precision, string embeddingModel, int dim, string builderCommit,
+        ProbeCache? probeCache = null)
     {
         var local = new List<ShardEnvironment>(shards.Count);
         foreach (var shard in shards)
         {
             local.Add(BuildEnvironment(
                 shard, rootAbs, gameVersion, onnxProvider, precision,
-                embeddingModel, dim, builderCommit));
+                embeddingModel, dim, builderCommit, probeCache));
         }
 
         string globalSymbolsHash = LayerHashes.ComputeGlobalSymbolsHash(
@@ -173,9 +175,15 @@ public static class ShardCatalog
         return result;
     }
 
-    /// <summary>该分片 Def + 程序集文件的内容哈希。</summary>
-    public static string ComputeSourceHash(string rootAbs, ShardSource shard)
-        => SourceHasher.HashFiles(rootAbs, shard.XmlFiles.Concat(shard.AssemblyFiles));
+    /// <summary>
+    /// 该分片 Def + 程序集文件的内容哈希。
+    /// 传入 <paramref name="probeCache"/> 时优先复用 mtime/size 未变化的缓存值，跳过读取与 SHA-256。
+    /// </summary>
+    public static string ComputeSourceHash(string rootAbs, ShardSource shard, ProbeCache? probeCache = null)
+        => probeCache is null
+            ? SourceHasher.HashFiles(rootAbs, shard.XmlFiles.Concat(shard.AssemblyFiles))
+            : probeCache.ComputeSourceHash(
+                shard.Name, rootAbs, shard.XmlFiles.Concat(shard.AssemblyFiles));
 
     private static IReadOnlyList<string> EnumerateFiles(string dir, string pattern, bool recursive = true)
         => Directory.Exists(dir)

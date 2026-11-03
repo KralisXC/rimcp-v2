@@ -20,6 +20,9 @@ obj/
 /index_*/
 /.build/
 
+# Launcher 快速预检缓存（mtime/size → 哈希），任何索引目录下都不入库
+.probe-cache.json
+
 # 忽略本地配置
 appsettings.json
 # Launcher 的默认配置模板需要入库，否则克隆后没有初始配置

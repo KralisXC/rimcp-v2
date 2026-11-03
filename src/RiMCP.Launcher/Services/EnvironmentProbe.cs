@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using RiMCP.Core.Indexing;
 using RiMCP.Core.Paths;
 using RiMCP.Core.Storage;
@@ -41,6 +42,9 @@ public sealed class ShardStatusResult
 
     /// <summary>一键诊断建议；无法诊断（环境错误）时为 null。</summary>
     public UpdateAdvice? Advice { get; init; }
+
+    /// <summary>本次检测的 [probe] 摘要（命中缓存 / 深度检测 + 耗时）。</summary>
+    public string? ProbeLog { get; init; }
 
     public string? Error { get; init; }
 }
@@ -149,8 +153,11 @@ public static class EnvironmentProbe
     /// 重跑分片比对：ShardCatalog.BuildEnvironments + ManifestComparer.Compare，
     /// 结果只映射到 <see cref="ShardRow"/>，Launcher 不自行判断层是否匹配。
     /// </summary>
-    public static ShardStatusResult LoadShardStatus(EnvironmentStatus env)
+    /// <param name="forceDeepCheck">true 时忽略 mtime 预检缓存，全量重新哈希（“强制深度检测”）。</param>
+    public static ShardStatusResult LoadShardStatus(EnvironmentStatus env, bool forceDeepCheck = false)
     {
+        var stopwatch = Stopwatch.StartNew();
+
         if (env.Root is null || env.RimWorldDataDir is null || env.IndexDir is null)
         {
             return new ShardStatusResult
@@ -220,10 +227,12 @@ public static class EnvironmentProbe
         }
 
         IReadOnlyList<ShardCatalog.ShardEnvironment> envs;
+        var probeCache = ProbeCache.Load(indexDir, ignoreCache: forceDeepCheck);
         try
         {
             envs = ShardCatalog.BuildEnvironments(
-                sources, dataDir, gameVersion, env.Provider, precision, model, dim, builderCommit);
+                sources, dataDir, gameVersion, env.Provider, precision, model, dim, builderCommit,
+                probeCache);
         }
         catch (Exception ex)
         {
@@ -241,6 +250,13 @@ public static class EnvironmentProbe
 
         // 诊断只做一次：状态表与顶部建议条共用同一份结果。
         var advice = UpdateAdvisor.Diagnose(v2Root, dataDir, indexDir, sources, envs, build);
+
+        stopwatch.Stop();
+        probeCache.Save();
+        string probeLog = forceDeepCheck || probeCache.RecomputedShards.Count > 0
+            ? $"[probe] 执行深度检测 (耗时 {stopwatch.Elapsed.TotalSeconds:F2} s)"
+            : $"[probe] 快速检测命中缓存 (耗时 {stopwatch.Elapsed.TotalSeconds:F2} s)";
+
         var diagnosisByName = advice.Shards
             .GroupBy(d => d.Shard, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
@@ -360,6 +376,7 @@ public static class EnvironmentProbe
             GraphOnlyAllowed = graphOnlyAllowed,
             GraphOnlyReason = reason,
             Advice = advice,
+            ProbeLog = probeLog,
         };
     }
 
@@ -466,25 +483,43 @@ public static class EnvironmentProbe
         return names.All(n => File.Exists(Path.Combine(graphDir, n)));
     }
 
-    /// <summary>探测 provider 可用性：cpu 恒可用；cuda 依 nvidia-smi；directml 依 DirectML.dll。</summary>
+    /// <summary>一次 CUDA 探测结果：驱动是否可用、CUDA 12 运行库是否存在、驱动报告的 CUDA 版本。</summary>
+    private sealed record CudaRuntime(bool DriverAvailable, bool Has12, string? DriverCudaVersion);
+
+    /// <summary>
+    /// 探测 provider 可用性：cpu 恒可用；cuda 需 NVIDIA 驱动 + CUDA 12.8 运行库；
+    /// directml 需 DirectML.dll。
+    /// </summary>
     private static string ProbeProviders(string selected, out bool ok)
     {
-        bool cuda = HasNvidiaSmi();
+        var cuda = ProbeCudaRuntime();
+        bool cudaUsable = cuda.DriverAvailable && cuda.Has12;
         bool directml = File.Exists(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.System), "DirectML.dll"));
-        bool selectedAvailable = selected switch
+        ok = selected switch
         {
-            "cuda" => cuda,
+            "cuda" => cudaUsable,
             "directml" => directml,
             _ => true,
         };
-        ok = selectedAvailable;
-        string available = $"cuda {(cuda ? "可用" : "不可用")} / directml {(directml ? "可用" : "不可用")} / cpu 可用";
+
+        string cudaState = cudaUsable
+            ? cuda.DriverCudaVersion is null
+                ? "cuda 可用（CUDA 12.x）"
+                : $"cuda 可用（CUDA 12.x，驱动最高支持 {cuda.DriverCudaVersion}）"
+            : cuda.DriverAvailable
+                ? "cuda 不可用（缺少 cublasLt64_12.dll，需 CUDA 12.8+）"
+                : "cuda 不可用（未检测到 NVIDIA 驱动）";
+
+        string available = $"{cudaState} / directml {(directml ? "可用" : "不可用")} / cpu 可用";
         return $"当前 {selected}；{available}";
     }
 
-    private static bool HasNvidiaSmi()
+    private static CudaRuntime ProbeCudaRuntime()
     {
+        bool driver = false;
+        string? driverVersion = null;
+
         try
         {
             using var process = new Process
@@ -492,25 +527,66 @@ public static class EnvironmentProbe
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = "nvidia-smi",
-                    Arguments = "-L",
                     CreateNoWindow = true,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
-                    RedirectStandardError = true,
                 },
             };
-            if (!process.Start()) return false;
-            if (!process.WaitForExit(3000))
+            if (process.Start() && process.WaitForExit(3000))
+            {
+                driver = process.ExitCode == 0;
+                if (driver)
+                {
+                    var match = Regex.Match(
+                        process.StandardOutput.ReadToEnd(), @"CUDA Version:\s*(\d+\.\d+)");
+                    if (match.Success) driverVersion = match.Groups[1].Value;
+                }
+            }
+            else
             {
                 try { process.Kill(true); } catch { }
-                return false;
             }
-            return process.ExitCode == 0;
         }
         catch
         {
-            return false;
+            // 未安装驱动或 nvidia-smi 不可用
         }
+
+        return new CudaRuntime(driver, HasCudaRuntime("12"), driverVersion);
+    }
+
+    /// <summary>检查 PATH 或标准 CUDA 安装目录下是否存在 CUDA 12 的 cublasLt64 DLL。</summary>
+    private static bool HasCudaRuntime(string major)
+    {
+        string dll = $"cublasLt64_{major}.dll";
+        foreach (var raw in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                     .Split(Path.PathSeparator))
+        {
+            string dir = raw.Trim().Trim('"');
+            if (dir.Length == 0) continue;
+            try
+            {
+                if (File.Exists(Path.Combine(dir, dll))) return true;
+            }
+            catch
+            {
+                // 非法 PATH 项直接跳过
+            }
+        }
+
+        string toolkitRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "NVIDIA GPU Computing Toolkit", "CUDA");
+        try
+        {
+            foreach (var dir in Directory.GetDirectories(toolkitRoot, $"v{major}*"))
+                if (File.Exists(Path.Combine(dir, "bin", dll))) return true;
+        }
+        catch
+        {
+            // 未安装 CUDA Toolkit
+        }
+        return false;
     }
 
     /// <summary>扫描 RiMCP_v2 根下所有以 “index” 开头的目录（供索引目录下拉框）。</summary>

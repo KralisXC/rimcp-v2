@@ -49,6 +49,9 @@
             <DockPanel LastChildFill="True">
                 <TextBlock DockPanel.Dock="Left" Text="环境" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,8,0"/>
                 <Button DockPanel.Dock="Right" x:Name="BtnRefresh" Content="刷新状态" Margin="12,0,0,0" Padding="10,3" Click="Refresh_Click"/>
+                <CheckBox DockPanel.Dock="Right" x:Name="ForceDeepCheck" Content="强制深度检测（忽略时间缓存）"
+                          VerticalAlignment="Center" Margin="12,0,0,0"
+                          ToolTip="勾选后忽略 mtime 预检缓存，对所有 XML/C# 全量重新哈希；仅排查用，速度较慢。"/>
                 <ComboBox DockPanel.Dock="Right" x:Name="IndexDirCombo" Width="160" IsEditable="True"
                           Margin="8,0,0,0" VerticalAlignment="Center"
                           ToolTip="当前索引目录名（键入后回车生效）；顶部环境条会基于该目录重新检测。"
@@ -195,17 +198,18 @@
                 <RowDefinition Height="200"/>
             </Grid.RowDefinitions>
             <ProgressBar x:Name="BuildProgress" Grid.Row="0" Height="6" IsIndeterminate="True" Visibility="Collapsed"/>
-            <TextBox x:Name="StageText" Grid.Row="1" Text="就绪" IsReadOnly="True" BorderThickness="0"
-                     Background="#F9FAFB" Padding="8,2" FontWeight="SemiBold"/>
-            <ListBox Grid.Row="2" x:Name="LogList" FontFamily="Consolas" FontSize="12" Margin="8,0,8,8"
-                     ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
-                     VirtualizingPanel.IsVirtualizing="True">
-                <ListBox.ItemTemplate>
-                    <DataTemplate>
-                        <TextBlock Text="{Binding Text}" Foreground="{Binding Foreground}" FontFamily="Consolas"/>
-                    </DataTemplate>
-                </ListBox.ItemTemplate>
-            </ListBox>
+            <DockPanel Grid.Row="1" Background="#F9FAFB">
+                <CheckBox DockPanel.Dock="Right" x:Name="AutoScrollCheck" Content="自动滚动" IsChecked="True"
+                          VerticalAlignment="Center" Margin="0,0,8,0"
+                          ToolTip="勾选且日志停在底部时自动跟随；向上翻阅旧日志时自动暂停。"/>
+                <TextBox x:Name="StageText" Text="就绪" IsReadOnly="True" BorderThickness="0"
+                         Background="Transparent" Padding="8,2" FontWeight="SemiBold"/>
+            </DockPanel>
+            <RichTextBox Grid.Row="2" x:Name="LogBox" IsReadOnly="True" IsUndoEnabled="False"
+                         FontFamily="Consolas" FontSize="12" Margin="8,0,8,8"
+                         BorderBrush="#D1D5DB" BorderThickness="1"
+                         VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                         ToolTip="可直接鼠标划选文本，Ctrl+C 复制。"/>
         </Grid>
     </Grid>
 </Window>

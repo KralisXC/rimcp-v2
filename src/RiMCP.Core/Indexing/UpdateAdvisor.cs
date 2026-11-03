@@ -400,17 +400,47 @@ public static class UpdateAdvisor
         string dataRoot, string indexDir, ShardSource shard,
         ShardManifest manifest, ShardCatalog.ShardEnvironment env, EmbeddingCache cache)
     {
-        var current = ComputeXmlContentEntries(
-            shard, dataRoot, env.EmbeddingModel, env.Dim, env.Precision,
-            ShardCatalog.EmbeddingPreprocessingRevision);
-        var currentHashes = current.Select(e => e.ContentHash).ToHashSet(StringComparer.Ordinal);
-
         var old = LoadOldXmlSnapshot(indexDir, shard.Name, cache);
         if (old is null)
         {
             return new TextComparison(
                 true, "无法从 symbols.tsv/embedding-cache.tsv 还原旧文本哈希，按内容变化处理");
         }
+
+        // mtime 预检：构建后未被修改过的 XML 文件不可能产生新条目，
+        // 直接复用旧快照中该文件的条目，跳过 XDocument.Load 解析。
+        // 仅在嵌入环境（模型/维度/精度/预处理修订）未变时成立，否则必须按当前参数重算哈希。
+        // XML 用不带容忍窗口的构建时间：构建后 2 秒内的改动也必须被识别（NTFS 时间戳精度足够）。
+        DateTime? unchangedBefore = SameTextEnvironment(manifest, env) ? BuiltAtUtc(manifest) : null;
+        var current = new List<XmlContentEntry>();
+        foreach (var file in shard.XmlFiles)
+        {
+            string relPath = dataRoot is null ? string.Empty : ToRelativePath(dataRoot, file);
+            var oldFile = old.ByFile.GetValueOrDefault(relPath);
+            if (oldFile is not null && unchangedBefore.HasValue
+                && NotNewerThan(file, unchangedBefore.Value))
+            {
+                foreach (var item in oldFile)
+                {
+                    current.Add(new XmlContentEntry(
+                        item.Symbol.Signature, item.Symbol.Kind, item.Symbol.Namespace,
+                        item.Symbol.ShortName, relPath, item.Symbol.LineStart, item.Hash));
+                }
+                continue;
+            }
+
+            try
+            {
+                AddXmlFileEntries(file, dataRoot, current, env.EmbeddingModel, env.Dim, env.Precision,
+                    ShardCatalog.EmbeddingPreprocessingRevision);
+            }
+            catch
+            {
+                // 与 XmlParser 一致：单个文件损坏时跳过。
+            }
+        }
+
+        var currentHashes = current.Select(e => e.ContentHash).ToHashSet(StringComparer.Ordinal);
 
         if (!currentHashes.SetEquals(old.Hashes))
         {
@@ -430,7 +460,12 @@ public static class UpdateAdvisor
         return new TextComparison(false, "仅 XML 属性顺序/注释/缩进变化，文本内容未变");
     }
 
-    private sealed record OldXmlSnapshot(HashSet<string> Hashes, List<SymbolEntry> Entries);
+    private sealed record OldXmlEntry(SymbolEntry Symbol, string Hash);
+
+    private sealed record OldXmlSnapshot(
+        HashSet<string> Hashes,
+        List<SymbolEntry> Entries,
+        Dictionary<string, List<OldXmlEntry>> ByFile);
 
     /// <summary>从 symbols.tsv + embedding-cache.tsv 还原旧 XML 快照；无法还原返回 null。</summary>
     private static OldXmlSnapshot? LoadOldXmlSnapshot(
@@ -451,6 +486,7 @@ public static class UpdateAdvisor
 
         var hashes = new HashSet<string>(StringComparer.Ordinal);
         var entries = new List<SymbolEntry>();
+        var byFile = new Dictionary<string, List<OldXmlEntry>>(StringComparer.Ordinal);
         foreach (var entry in all)
         {
             if (entry.Source != SourceType.Xml) continue;
@@ -458,8 +494,30 @@ public static class UpdateAdvisor
                 return null;
             hashes.Add(hash);
             entries.Add(entry);
+
+            string relPath = NormalizeRelPath(entry.FileRelPath);
+            var list = byFile.TryGetValue(relPath, out var existing)
+                ? existing
+                : byFile[relPath] = new List<OldXmlEntry>();
+            list.Add(new OldXmlEntry(entry, hash));
         }
-        return new OldXmlSnapshot(hashes, entries);
+        return new OldXmlSnapshot(hashes, entries, byFile);
+    }
+
+    /// <summary>统一为正斜杠，保证与 <see cref="ToRelativePath"/> 的结果可直接比较。</summary>
+    private static string NormalizeRelPath(string path) => path.Replace('\\', '/').TrimStart('/');
+
+    /// <summary>文件是否未在给定时间点之后被修改（相差 2 秒容忍文件系统时间精度）。</summary>
+    private static bool NotNewerThan(string file, DateTime limitUtc)
+    {
+        try
+        {
+            return File.Exists(file) && File.GetLastWriteTimeUtc(file) <= limitUtc;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -498,19 +556,9 @@ public static class UpdateAdvisor
     {
         if (shard.AssemblyFiles.Count == 0) return false;
 
-        DateTime builtAtUtc;
-        if (string.IsNullOrWhiteSpace(manifest.BuiltAt)) return true;
-        try
-        {
-            builtAtUtc = DateTimeOffset.Parse(
-                manifest.BuiltAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind).UtcDateTime;
-        }
-        catch
-        {
-            return true;
-        }
+        var limit = BuildLimit(manifest);
+        if (limit is null) return true;
 
-        var limit = builtAtUtc.AddSeconds(2);
         foreach (var file in shard.AssemblyFiles)
         {
             try
@@ -524,6 +572,34 @@ public static class UpdateAdvisor
         }
         return false;
     }
+
+    /// <summary>manifest 记录的嵌入参数是否与当前环境一致（不一致时旧哈希不可复用）。</summary>
+    private static bool SameTextEnvironment(
+        ShardManifest manifest, ShardCatalog.ShardEnvironment env)
+        => string.Equals(manifest.EmbeddingModel, env.EmbeddingModel, StringComparison.OrdinalIgnoreCase)
+           && manifest.Dim == env.Dim
+           && string.Equals(manifest.Precision, env.Precision, StringComparison.OrdinalIgnoreCase)
+           && manifest.PreprocessingRevision == ShardCatalog.EmbeddingPreprocessingRevision;
+
+    /// <summary>manifest 构建时间（UTC）；缺失或无法解析时返回 null。</summary>
+    private static DateTime? BuiltAtUtc(ShardManifest manifest)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.BuiltAt)) return null;
+        try
+        {
+            return DateTimeOffset.Parse(
+                    manifest.BuiltAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
+                .UtcDateTime;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>manifest 构建时间 + 2 秒容忍（仅 C# 修改时间判定使用）；无法解析时返回 null。</summary>
+    private static DateTime? BuildLimit(ShardManifest manifest)
+        => BuiltAtUtc(manifest)?.AddSeconds(2);
 
     private sealed record TextComparison(bool Changed, string Reason);
 

@@ -9,7 +9,7 @@
     <Nullable>enable</Nullable>
     <!-- stdio 服务器不需要生成宿主启动器 -->
     <UseAppHost>true</UseAppHost>
-    <!-- ONNX 后端编译期选择：CUDA(默认) / DirectML / CPU -->
+    <!-- ONNX 后端编译期选择：CUDA 12.8（默认）/ DirectML / CPU -->
     <OnnxBackend Condition="'$(OnnxBackend)' == ''">CUDA</OnnxBackend>
   </PropertyGroup>
 
@@ -32,10 +32,11 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(OnnxBackend)' == 'CUDA'">
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.30.0" />
+    <!-- 1.22.0 的 GPU 包按 CUDA 12.8 + cuDNN 9.x 构建，与目标机器匹配 -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.22.0" />
   </ItemGroup>
   <ItemGroup Condition="'$(OnnxBackend)' == 'DirectML'">
-    <!-- DirectML 包发布节奏较慢，最高可用 1.24.4（其余后端为 1.30.0） -->
+    <!-- DirectML 包发布节奏较慢，最高可用 1.24.4 -->
     <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
   </ItemGroup>
   <ItemGroup Condition="'$(OnnxBackend)' == 'CPU'">

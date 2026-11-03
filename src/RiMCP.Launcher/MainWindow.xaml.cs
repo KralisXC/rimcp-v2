@@ -4,16 +4,15 @@ using System.IO;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using RiMCP.Core.Indexing;
 using RiMCP.Launcher.Services;
 using RiMCP.Launcher.ViewModels;
 
 namespace RiMCP.Launcher;
-
-/// <summary>日志区一行（Text 与颜色直接绑定到 ListBox 模板）。</summary>
-public sealed record LogEntry(string Text, Brush Foreground);
 
 public partial class MainWindow : Window
 {
@@ -22,13 +21,19 @@ public partial class MainWindow : Window
         LauncherConfig.FollowEnvironment, "cuda", "directml", "cpu",
     };
 
+    private const int MaxLogLines = 3000;
+
     private readonly LauncherConfig _config = LauncherConfig.Load();
     private readonly ProcessRunner _buildRunner = new();
     private readonly ProcessRunner _mcpRunner = new();
     private readonly ObservableCollection<ShardRow> _rows = new();
     private readonly ObservableCollection<ProbeItem> _probeItems = new();
-    private readonly ObservableCollection<LogEntry> _log = new();
     private readonly StringBuilder _logBuffer = new();
+
+    private Paragraph? _logParagraph;
+    private int _logLineCount;
+    private bool _logAtBottom = true;
+    private bool _autoScrollPending;
 
     private EnvironmentStatus? _env;
     private ShardStatusResult? _status;
@@ -45,7 +50,9 @@ public partial class MainWindow : Window
         ShardGrid.ItemsSource = _rows;
         ShardList.ItemsSource = _rows;
         EnvItems.ItemsSource = _probeItems;
-        LogList.ItemsSource = _log;
+
+        LogBox.Document = new FlowDocument { PagePadding = new Thickness(4, 2, 4, 2) };
+        LogBox.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(LogScrollChanged));
 
         ProviderCombo.ItemsSource = ProviderOptions;
         ProviderCombo.SelectedItem = ProviderOptions.Contains(_config.LastProvider)
@@ -140,10 +147,11 @@ public partial class MainWindow : Window
         StageText.Text = "正在比对分片状态…";
 
         var env = _env;
+        bool forceDeep = ForceDeepCheck.IsChecked == true;
         ShardStatusResult result;
         try
         {
-            result = await Task.Run(() => EnvironmentProbe.LoadShardStatus(env));
+            result = await Task.Run(() => EnvironmentProbe.LoadShardStatus(env, forceDeep));
         }
         catch (Exception ex)
         {
@@ -172,6 +180,7 @@ public partial class MainWindow : Window
         };
         ApplyAdvice(result.Advice);
         StageText.Text = $"就绪（{_rows.Count} 个分片）";
+        if (!string.IsNullOrEmpty(result.ProbeLog)) AppendLog(result.ProbeLog);
         BtnRefresh.IsEnabled = !_buildRunning;
         UpdateButtons();
     }
@@ -394,6 +403,8 @@ public partial class MainWindow : Window
         {
             AppendLog("[launcher] 构建完成（exit 0）。", false);
             StageText.Text = "构建完成";
+            // 构建成功后强制刷新一次：顶部环境条与状态表立即翻转，无需用户手动点“刷新状态”。
+            RefreshEnvironment();
         }
         else
         {
@@ -496,14 +507,53 @@ public partial class MainWindow : Window
 
     private void AppendLog(string text, bool isError = false)
     {
-        var entry = new LogEntry(text, isError ? Brushes.Firebrick : Brushes.Black);
-        _log.Add(entry);
+        if (_logParagraph is null)
+        {
+            _logParagraph = new Paragraph { Margin = new Thickness(0) };
+            LogBox.Document.Blocks.Add(_logParagraph);
+        }
+
+        _logParagraph.Inlines.Add(new Run(text)
+        {
+            Foreground = isError ? Brushes.Firebrick : Brushes.Black,
+        });
+        _logParagraph.Inlines.Add(new LineBreak());
+        _logLineCount++;
+
+        while (_logLineCount > MaxLogLines)
+        {
+            var first = _logParagraph.Inlines.FirstInline;
+            if (first is null) break;
+            _logParagraph.Inlines.Remove(first);
+            if (_logParagraph.Inlines.FirstInline is LineBreak lineBreak)
+                _logParagraph.Inlines.Remove(lineBreak);
+            _logLineCount--;
+        }
+
         _logBuffer.AppendLine(text);
-
-        while (_log.Count > 3000) _log.RemoveAt(0);
-        LogList.ScrollIntoView(entry);
-
+        RequestAutoScroll();
         UpdateStage(text);
+    }
+
+    /// <summary>仅当“自动滚动”勾选且用户当前停在日志底部时才滚到底，避免打断向上翻阅。</summary>
+    private void RequestAutoScroll()
+    {
+        if (AutoScrollCheck.IsChecked != true || !_logAtBottom || _autoScrollPending) return;
+
+        _autoScrollPending = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            _autoScrollPending = false;
+            LogBox.ScrollToEnd();
+            _logAtBottom = true;
+        }));
+    }
+
+    /// <summary>内容高度变化（追加文本）不算用户滚动；只有用户拖动时更新“是否在底部”。</summary>
+    private void LogScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (e.ExtentHeightChange == 0)
+            _logAtBottom = e.VerticalOffset + e.ViewportHeight >= e.ExtentHeight - 4;
     }
 
     private void UpdateStage(string line)

@@ -11,9 +11,11 @@
 | 操作系统 | Windows 10 / 11 x64 | Launcher 为 WPF 应用 |
 | .NET | **.NET 8 SDK** | 构建与运行必需 |
 | NVIDIA 驱动 | 最新 Game Ready / Studio 驱动 | 使用 CUDA 时必需 |
-| CUDA Toolkit | **12.4** | 与 cuDNN 9.x 配套 |
-| cuDNN | **9.x** | 放置到系统 PATH 或 CUDA 目录 |
+| CUDA Toolkit | **12.8（最低 12.x）** | ONNX Runtime 1.22.0 的 GPU 包按 CUDA 12.8 构建，需安装 12.8 或更新版本 |
+| cuDNN | **9.x** | 需与 CUDA 12.8 配套，放置到系统 PATH 或 CUDA 目录 |
 | 显卡 | 兼容新老架构 | 实测覆盖 RTX 4050 与 GTX 1080Ti |
+
+CUDA 12.8 仍支持 Pascal 架构（如 GTX 1080Ti）；若旧显卡遇到兼容问题，请在 Launcher 中选择 directml 或 cpu provider（DirectML 需以 `-p:OnnxBackend=DirectML` 重新构建）。
 
 没有 NVIDIA 显卡时，可在 Launcher 中切换执行提供器：
 
@@ -53,7 +55,7 @@ RiMCP_v2/
 
 ## 核心功能
 
-- **傻瓜式诊断中枢（Launcher）**：自动比对 Def/符号/文本哈希和 C# 修改时间，直接告诉你该“无需构建 / 仅图谱 / 增量构建 / 全量重建”，并支持 ⚡ 一键执行，避免凭感觉点按钮。
+- **傻瓜式诊断中枢（Launcher）**：自动比对 Def/符号/文本哈希和 C# 修改时间，直接告诉你该“无需构建 / 仅图谱 / 增量构建 / 全量重建”，并支持 ⚡ 一键执行，避免凭感觉点按钮。内置基于文件修改时间（mtime）的快速预检缓存，二次启动环境检测秒出（1~2 秒内），并支持勾选“强制深度检测”。
 - **分片增量构建**：按符号级内容哈希复用向量，只重算真正变化的条目。改几行代码通常只需几秒，不必再等 40 分钟全量。
 - **多版本隔离（`RIMCP_INDEX_DIR`）**：同一套 `RimWorldData/` 与 `models/` 下可维护 1.6、1.7 等多份索引（如 `index_16/`、`index_17/`），构建产物、`embedding-cache.tsv` 与检查点互不污染。
 - **双态加载模式（`RIMCP_LOAD_MODE`）**：`mmap` 按需映射，内存占用低；`full` 全量载入内存，查询延迟最低。低配电脑也能秒出结果。
@@ -78,7 +80,8 @@ RiMCP_v2/
       "env": {
         "RIMCP_ROOT": "E:\\KMODS\\RiMCP_v2_3",
         "RIMCP_LOAD_MODE": "full",
-        "RIMCP_INDEX_DIR": "index_17"
+        "RIMCP_INDEX_DIR": "index_17",
+        "RIMCP_ONNX_PROVIDER": "cpu"
       }
     }
   }
@@ -90,6 +93,7 @@ RiMCP_v2/
 - `RIMCP_ROOT`：RiMCP_v2 根目录（其下必须有 `RimWorldData/` 与 `models/`）。
 - `RIMCP_LOAD_MODE`：`full` 全量内存加载（推荐，查询最快）；`mmap` 按需映射（低内存机器）。
 - `RIMCP_INDEX_DIR`：索引目录名或绝对路径。改成 `index_16` 即切换到 1.6 索引，改成 `index_17` 即使用 1.7 索引；删除该变量则使用默认 `index/`。
+- `RIMCP_ONNX_PROVIDER`：执行提供器，可选 `cuda` / `directml` / `cpu`。**没有 NVIDIA 显卡时必须显式指定 `cpu` 或 `directml`**（DirectML 需以 `-p:OnnxBackend=DirectML` 构建）；留空时按环境自动探测，探测失败会在启动阶段报错或静默回退，排查成本较高。有 N 卡时改为 `cuda`。
 - JSON 标准不支持 `//` 注释，因此多版本切换通过修改 `RIMCP_INDEX_DIR` 的值完成。
 - 如果不想每次让 `dotnet run` 检查项目，可先构建，再把 `command` 指向 `src/RiMCP.McpServer/bin/Release/net8.0/RiMCP.McpServer.exe`。
 

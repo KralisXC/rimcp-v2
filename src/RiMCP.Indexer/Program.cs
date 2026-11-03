@@ -5,6 +5,15 @@ using RiMCP.Core.Storage;
 using RiMCP.Indexer.Building;
 using RiMCP.Indexer.Config;
 
+// 固定 UTF-8 输出：重定向时直接写 UTF-8 字节，避免控制台代码页差异导致 Launcher 日志乱码。
+try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch (System.IO.IOException) { }
+if (Console.IsOutputRedirected)
+    Console.SetOut(new System.IO.StreamWriter(
+        Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true });
+if (Console.IsErrorRedirected)
+    Console.SetError(new System.IO.StreamWriter(
+        Console.OpenStandardError(), new System.Text.UTF8Encoding(false)) { AutoFlush = true });
+
 Stopwatch clock = Stopwatch.StartNew();
 
 int ExitFail(string message)

@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Text;
 using RiMCP.Launcher.ViewModels;
@@ -13,10 +12,10 @@ namespace RiMCP.Launcher.Services;
 public sealed class ProcessRunner
 {
     /// <summary>
-    /// 子进程由 WinExe 父进程以隐藏控制台启动，控制台代码页为系统 OEM 页（中文 Windows 为 936），
-    /// 因此 Indexer/MCP 的中文输出按 OEM 编码写出，不能按 UTF-8 解读。
+    /// 子进程在重定向 stdio 时按 UTF-8 写出中文，父进程必须用 UTF-8 解码；
+    /// 若按系统 OEM 代码页（中文 Windows 为 936）解码，会得到“鐩爣绱㈠紩鐩綍”这类乱码。
     /// </summary>
-    private static readonly Encoding ChildConsoleEncoding = ResolveChildConsoleEncoding();
+    private static readonly Encoding ChildOutputEncoding = Encoding.UTF8;
 
     private readonly object _gate = new();
     private Process? _current;
@@ -59,8 +58,8 @@ public sealed class ProcessRunner
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            StandardOutputEncoding = ChildConsoleEncoding,
-            StandardErrorEncoding = ChildConsoleEncoding,
+            StandardOutputEncoding = ChildOutputEncoding,
+            StandardErrorEncoding = ChildOutputEncoding,
         };
         foreach (var arg in args) psi.ArgumentList.Add(arg);
         psi.Environment["RIMCP_ROOT"] = request.RootDir;
@@ -116,8 +115,8 @@ public sealed class ProcessRunner
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            StandardOutputEncoding = ChildConsoleEncoding,
-            StandardErrorEncoding = ChildConsoleEncoding,
+            StandardOutputEncoding = ChildOutputEncoding,
+            StandardErrorEncoding = ChildOutputEncoding,
         };
         foreach (var arg in args) psi.ArgumentList.Add(arg);
         psi.Environment["RIMCP_ROOT"] = env.Root;
@@ -159,42 +158,34 @@ public sealed class ProcessRunner
         process.ErrorDataReceived += (_, e) => { if (e.Data is not null) onLine(e.Data, true); };
     }
 
-    /// <summary>取系统 OEM 代码页作为子进程控制台输出编码；不可用时退回 UTF-8。</summary>
-    private static Encoding ResolveChildConsoleEncoding()
-    {
-        try
-        {
-            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-            return Encoding.GetEncoding(CultureInfo.CurrentCulture.TextInfo.OEMCodePage);
-        }
-        catch
-        {
-            return Encoding.UTF8;
-        }
-    }
-
-    /// <summary>优先使用已编译 DLL（Release），否则回退 dotnet run。</summary>
+    /// <summary>
+    /// 优先用 dotnet run 按源码增量编译，避免旧目录里残留的 Release DLL（例如升级前的 GBK 输出）
+    /// 被直接复用；仅在源码缺失时才回退到已编译 DLL。
+    /// </summary>
     private static (string FileName, List<string> Args) ResolveIndexer(string sourceRoot, List<string> buildArgs)
     {
         string projectDir = Path.Combine(sourceRoot, "src", "RiMCP.Indexer");
-        string dll = Path.Combine(projectDir, "bin", "Release", "net8.0", "RiMCP.Indexer.dll");
-        if (File.Exists(dll))
-            return ("dotnet", new List<string> { dll }.Concat(buildArgs).ToList());
-
         string csproj = Path.Combine(projectDir, "RiMCP.Indexer.csproj");
-        var args = new List<string> { "run", "-c", "Release", "--project", csproj, "--" };
-        args.AddRange(buildArgs);
-        return ("dotnet", args);
+        if (File.Exists(csproj))
+        {
+            var args = new List<string> { "run", "-c", "Release", "--project", csproj, "--" };
+            args.AddRange(buildArgs);
+            return ("dotnet", args);
+        }
+
+        string dll = Path.Combine(projectDir, "bin", "Release", "net8.0", "RiMCP.Indexer.dll");
+        return ("dotnet", new List<string> { dll }.Concat(buildArgs).ToList());
     }
 
+    /// <summary>与 <see cref="ResolveIndexer"/> 同理，优先按源码增量编译，避免复用旧 MCP 二进制。</summary>
     private static (string FileName, List<string> Args) ResolveMcp(string sourceRoot)
     {
         string projectDir = Path.Combine(sourceRoot, "src", "RiMCP.McpServer");
-        string dll = Path.Combine(projectDir, "bin", "Release", "net8.0", "RiMCP.McpServer.dll");
-        if (File.Exists(dll))
-            return ("dotnet", new List<string> { dll });
-
         string csproj = Path.Combine(projectDir, "RiMCP.McpServer.csproj");
-        return ("dotnet", new List<string> { "run", "-c", "Release", "--project", csproj });
+        if (File.Exists(csproj))
+            return ("dotnet", new List<string> { "run", "-c", "Release", "--project", csproj });
+
+        string dll = Path.Combine(projectDir, "bin", "Release", "net8.0", "RiMCP.McpServer.dll");
+        return ("dotnet", new List<string> { dll });
     }
 }

@@ -4,6 +4,15 @@ using Microsoft.Extensions.Logging;
 using RiMCP.Core.Paths;
 using RiMCP.McpServer.Services;
 
+// 固定 UTF-8 输出（含 stderr 日志）：重定向时直接写 UTF-8 字节，与 Launcher 的读取保持一致。
+try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch (System.IO.IOException) { }
+if (Console.IsOutputRedirected)
+    Console.SetOut(new System.IO.StreamWriter(
+        Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true });
+if (Console.IsErrorRedirected)
+    Console.SetError(new System.IO.StreamWriter(
+        Console.OpenStandardError(), new System.Text.UTF8Encoding(false)) { AutoFlush = true });
+
 // ============================================================================
 // RiMCP.McpServer —— RimWorld 代码检索 MCP stdio 服务器
 //
